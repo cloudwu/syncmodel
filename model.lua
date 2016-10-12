@@ -157,6 +157,21 @@ function model:advance(ti)
 	self.__current = ti
 end
 
+function model:remove(ti)
+	local tq = self.__command_time
+	for i=1,#tq do
+		if tq[i] == ti then
+			table.remove(tq, i)
+			table.remove(self.__command_queue, i)
+			if ti <= self.__current then
+				rollback_state(self)
+				return true	-- state change
+			end
+			return
+		end
+	end
+end
+
 function model:state()
 	return self.__state
 end

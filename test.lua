@@ -30,6 +30,7 @@ print_r(m:state())
 m:advance(3)
 print_r(m:state())
 m:command(1, foo1)
+m:remove(2)
 m:advance(4)
 print_r(m:state())
 
