@@ -2,6 +2,7 @@ local model = require "model"
 local print_r = require "print_r"
 
 local function foo1(obj, ti)
+	assert(obj.a < 5)
 	obj.a = obj.a + 1
 	obj.b = obj.b * obj.a
 
@@ -31,6 +32,8 @@ print_r(m:state())
 m:command(1, foo1)
 m:advance(4)
 print_r(m:state())
+
+m:clear_error()
 
 
 
