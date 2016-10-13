@@ -51,7 +51,7 @@ function model.new(obj)
 		__current = 0,	-- the time before __current ( == __current) is already apply to __state
 		__command_time = {},
 		__command_queue = {},
-		__error = {},
+		__command_error = {},	-- mark the error command
 	}
 	return setmetatable(self, model)
 end
@@ -70,51 +70,44 @@ local function queue_command(self, ti, func)
 	if idx then
 		table.insert(tq, idx, ti)
 		table.insert(self.__command_queue, idx, func)
+		table.insert(self.__command_error, idx, false)
 	else
 		table.insert(tq, ti)
 		table.insert(self.__command_queue, func)
+		table.insert(self.__command_error, false)
 	end
 end
 
 local function do_command(self, i, queue_name)
+	if self.__command_error[i] then
+		return false -- skip
+	end
 	local ok, err = pcall(self.__command_queue[i], self[queue_name], self.__command_time[i])
 	if ok then
 		return
 	else
-		local ti = self.__command_time[i]
-		self.__error[ti] = err
+		self.__command_error[i] = err
 		return true	-- failed
 	end
 end
 
-local function remove_error(self)
-	local time = self.__command_time
-	local queue = self.__command_queue
-	for ti in pairs(self.__error) do
-		for i=1,#time do
-			if time[i] == ti then
-				table.remove(time, i)
-				table.remove(queue, i)
-				break
-			end
+local function apply_command(self)
+	local tq = self.__command_time
+	for i=1, #tq do
+		if tq[i] > self.__current then
+			return
+		end
+		if do_command(self, i, "__state") then
+			deepcopy(self.__base, self.__state)
+			return apply_command(self) -- error, again
 		end
 	end
 end
 
 local function rollback_state(self)
-	local tq = self.__command_time
 	local command = self.__command_queue
 	deepcopy(self.__base, self.__state)
-	local err
-	for i=1, #tq do
-		if tq[i] > self.__current then
-			return
-		end
-		err = do_command(self, i, "__state") or err
-	end
-	if err then
-		remove_error(self)
-	end
+	apply_command(self)
 end
 
 function model:command(ti, func)
@@ -128,33 +121,45 @@ function model:command(ti, func)
 	return true
 end
 
-function model:advance(ti)
-	local last = self.__current
-	local command = self.__command_queue
+local function advance_command(self, from)
 	local tq = self.__command_time
-	assert(ti > last)
-	if ti > self.__basetime + TIME_ROLLBACK then
-		-- erase expired command
-		local basetime = ti - TIME_ROLLBACK
-		while tq[1] and tq[1] < basetime do
-			do_command(self, 1, "__base")
-			table.remove(tq,1)
-			table.remove(command,1)
-		end
-	end
-	local err
-	for i=1, #tq do
+	local ti = self.__current
+	for i=from, #tq do
 		local t = tq[i]
 		if t > ti then
 			break
-		elseif t > last then
-			err = do_command(self, i, "__state") or err
+		end
+		if do_command(self, i, "__state") then
+			deepcopy(self.__base, self.__state)
+			return advance_command(self, from)
 		end
 	end
-	if err then
-		remove_error(self)
+end
+
+function model:advance(ti)
+	assert(ti > self.__current)
+	if ti > self.__basetime + TIME_ROLLBACK then
+		-- erase expired command
+		local basetime = ti - TIME_ROLLBACK
+		local tq = self.__command_time
+		local err = self.__command_error
+		local command = self.__command_queue
+		while tq[1] and tq[1] < basetime do
+			do_command(self, 1, "__base")	-- ignore error
+			table.remove(tq,1)
+			table.remove(command,1)
+			table.remove(err, 1)
+		end
 	end
+	local tq = self.__command_time
+	local last = self.__current
 	self.__current = ti
+	for i=1, #tq do
+		local t = tq[i]
+		if t > last then
+			return advance_command(self, i)
+		end
+	end
 end
 
 function model:remove(ti)
@@ -163,7 +168,13 @@ function model:remove(ti)
 		if tq[i] == ti then
 			table.remove(tq, i)
 			table.remove(self.__command_queue, i)
+			table.remove(self.__command_error, i)
 			if ti <= self.__current then
+				local err = self.__command_error
+				-- reset error command, apply again
+				for j=1,i do
+					err[j] = false
+				end
 				rollback_state(self)
 				return true	-- state change
 			end
@@ -176,12 +187,27 @@ function model:state()
 	return self.__state
 end
 
-function model:clear_error()
-	local err = self.__error
-	for k,v in pairs(err) do
-		-- todo: handle the error command
-		print("clear error", k, v)
-		err[k] = nil
+local function model_error(self, ti)
+	local tq = self.__command_time
+	local err = self.__command_error
+	for i=1,#tq do
+		if err[i] then
+			if ti == nil or ti > tq[i] then
+				return tq[i], err[i]
+			end
+		end
+	end
+end
+
+function model:error()
+	return model_error, self
+end
+
+function model:dump() -- debug use
+	print(string.format("base time = %d , current time = %d", self.__basetime, self.__current))
+	local tq = self.__command_time
+	for i=1,#tq do
+		print(i, tq[i], self.__command_queue[i], self.__command_error[i])
 	end
 end
 
