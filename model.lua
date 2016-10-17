@@ -109,9 +109,11 @@ function model:apply_command(ti, method, ...)
 		if ti < timeline then
 			return false, "command expired"
 		end
-		tq[1](self.__base, timeline)
+		local f = self.__command_queue[1]
+		f[1](self.__base, timeline, tunpack(f, 2, f.n))
 		table.remove(tq,1)
 		table.remove(self.__command_queue,1)
+		qlen = qlen - 1
 	end
 
 	for i = 1, qlen do
