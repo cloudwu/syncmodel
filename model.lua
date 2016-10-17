@@ -43,8 +43,10 @@ end
 local model = {} ; model.__index = model
 local QUEUE_LENGTH = 100	-- cache max command
 local traceback = debug.traceback
+local tpack = table.pack
+local tunpack = table.unpack
 
-function model.new(obj)
+function model.new(obj, method)
 	local self = {
 		__base = deepcopy(obj),
 		__state = deepcopy(obj),
@@ -52,6 +54,7 @@ function model.new(obj)
 		__command_queue = {},
 		__snapshot = 0,
 		__snapinvalid = true,
+		__method = method
 	}
 	return setmetatable(self, model)
 end
@@ -62,38 +65,43 @@ local function rollback(self)
 	local state = deepcopy(self.__base, self.__state)
 	local tq = self.__command_time
 	local cq = self.__command_queue
+	local m = self.__method
 	for i = 1, #tq do
-		cq[i](state, tq[i])
+		local f = cq[i]
+		m[f[1]](state, tq[i], tunpack(f, 2, f.n))
 	end
 end
 
-local function insert_before(self, idx, ti, func)
+local function insert_before(self, idx, ti, method, ...)
 	local state = deepcopy(self.__base, self.__state)
 	local tq = self.__command_time
 	local cq = self.__command_queue
+	local m = self.__method
 	for i = 1, idx-1 do
-		cq[i](state, tq[i])
+		local f = cq[i]
+		m[f[1]](state, tq[i], tunpack(f, 2, f.n))
 	end
-	local ok , err = xpcall(func, traceback, state, ti)
+	local ok , err = xpcall(m[method], traceback, state, ti, ...)
 	if not ok then
 		rollback(self)
 		return false, err
 	end
 	for i = idx, #tq do
-		if not xpcall(cq[i], traceback, state, tq[i]) then
+		local f = cq[i]
+		if not xpcall(m[f[1]], traceback, state, tq[i], tunpack(f, 2, f.n)) then
 			rollback(self)
 			return false, "Can't insert command"
 		end
 	end
 	table.insert(tq, idx, ti)
-	table.insert(cq, idx, func)
+	table.insert(cq, idx, tpack(method, ...))
 	return true
 end
 
 -- call by server.
 -- return false, err_message when failed ;
 -- return true, insert done, no error.
-function model:apply_command(ti, func)
+function model:apply_command(ti, method, ...)
 	local tq = self.__command_time
 	local qlen = #tq
 	if qlen >= QUEUE_LENGTH then
@@ -103,18 +111,18 @@ function model:apply_command(ti, func)
 		end
 		tq[1](self.__base, timeline)
 		table.remove(tq,1)
-		table.remove(self.__command_time,1)
+		table.remove(self.__command_queue,1)
 	end
 
 	for i = 1, qlen do
 		if ti < tq[i] then
-			return insert_before(self, i, ti, func)
+			return insert_before(self, i, ti, method, ...)
 		end
 	end
-	local ok, err = xpcall(func, traceback, self.__state, ti)
+	local ok, err = xpcall(self.__method[method], traceback, self.__state, ti, ...)
 	if ok then
 		table.insert(tq, ti)
-		table.insert(self.__command_queue, func)
+		table.insert(self.__command_queue, tpack(method, ...))
 		return true
 	end
 	return false, err
@@ -125,6 +133,10 @@ function model:current_state()
 	return tq[#tq] or 0, self.__state
 end
 
+function model:base_state()
+	return self.__base_state, self.__command_time, self.__command_queue
+end
+
 ------for client side
 
 local function touch_snapshot(self, ti)
@@ -133,30 +145,32 @@ local function touch_snapshot(self, ti)
 	end
 end
 
-function model:queue_command(ti, func)
+function model:queue_command(ti, method, ...)
 	local tq = self.__command_time
 	local cq = self.__command_queue
+	local m = self.__method
 	for i = 1, #tq do
 		assert(ti ~= tq[i])
 		if ti < tq[i] then
 			if i > QUEUE_LENGTH and tq[1] < self.__snapshot then
-				if not pcall(cq[1], self.__base, tq[1]) then
+				local f = cq[1]
+				if not pcall(m[f[1]], self.__base, tq[1], tunpack(f, 2, f.n)) then
 					return false
 				end
 				table.move(tq, 2, i, 1)
 				table.move(cq, 2, i, 1)
 				tq[i] = ti
-				cq[i] = func
+				cq[i] = method
 			else
 				table.insert(tq, i, ti)
-				table.insert(cq, i, func)
+				table.insert(cq, i, tpack(method, ...))
 			end
 			touch_snapshot(self, ti)
 			return true
 		end
 	end
 	table.insert(tq, ti)
-	table.insert(cq, func)
+	table.insert(cq, tpack(method,...))
 	touch_snapshot(self, ti)
 	return true
 end
@@ -185,6 +199,7 @@ function model:snapshot(ti)
 	local idx
 	local tq = self.__command_time
 	local cq = self.__command_queue
+	local m = self.__method
 	if self.__snapinvalid then
 		deepcopy(self.__base, self.__state)
 		idx = #tq + 1
@@ -195,7 +210,8 @@ function model:snapshot(ti)
 				idx = i
 				break
 			end
-			if not pcall(cq[i], state, t) then
+			local f = cq[i]
+			if not pcall(m[f[1]], state, t, tunpack(f, 2, f.n)) then
 				return	-- failed
 			end
 		end
@@ -213,7 +229,8 @@ function model:snapshot(ti)
 		if t > ti then
 			break
 		end
-		if not pcall(cq[i], state, t) then
+		local f = cq[i]
+		if not pcall(m[f[1]], state, t, tunpack(f, 2, f.n)) then
 			self.__snapinvalid = true
 			return -- failed
 		end
