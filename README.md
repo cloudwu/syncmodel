@@ -5,18 +5,14 @@ http://blog.codingnow.com/2016/10/synchronization.html
 
 使用应遵循以下规则：
 
-1. model:command 只能修改传入的对象的数据，不得调用会影响其它数据有副作用的函数。
+所有客户端的时间戳按一致的规则加上偏移量，保证每条事件都有唯一的时间，即用时间戳可以唯一表示一个 command 。
 
-2. 所有客户端的时间戳按一致的规则加上偏移量，保证每条事件都有唯一的时间，即用时间戳可以唯一表示一个 command 。
+对于 Server ，使用 model:apply_command(ti, func) 应用 Client 上传的指令。如果返回 false, error 则执行失败（或回滚队列太长），应该通知该客户端删除。
 
-3. 服务器收到客户端的 command 后，如果超过时间窗口，命令该客户端删除 (model:remove) 这个 command 。
+Server side 可以用 model:current_state 查询当前最新的状态和时间。
 
-4. 服务器收到时间窗口内的 command ，加入自己的 model (model:command) ，并转发给所有客户端。
+对于 Client ，使用 model:queue_command(ti, func) 将自身操作的指令或 Server 下发的指令排入队列，如果返回 false 表示插入无效，此刻应和 Server 做一次状态同步。
 
-5. 服务器和客户端都按时间心跳推进( model:advance ) model 。
+Client 应使用 model:snapshot(ti) 获取某个时间点的状态快照；snapshot 传入的时间戳不能比之前的小。如果返回 nil ，表示状态暂不可用，应当等待 Server 后续指令或重新做同步。
 
-6. 在推进 model 后，服务器若发现 error ( 使用 model:error 遍历) ，删除 error 的 command 并通知所有客户端删除。
-
-7. 客户端推进 model 后，如果 error ，不直接删除；保留一段时间；如果在这段时间内，未收到服务器发送来的删除指令，重新和服务器同步状态。
-
-8. 客户端登录后，由服务器把 model 的全部状态 (model:state) 同步给他。
+当 Server 命令 Client 删除某时刻的指令时，Client 应调用 model:remove_command(ti) 删。通常可以再删除后再次用 snapshot 获取快照。

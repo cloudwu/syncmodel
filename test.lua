@@ -1,54 +1,46 @@
 local model = require "model"
 local print_r = require "print_r"
 
-local function foo1(obj, ti)
-	assert(obj.a < 5 , string.format("a=%d b=%d ti=%d", obj.a,obj.b, ti))
-	obj.a = obj.a + 1
-	obj.b = obj.b * obj.a
+local function sub1(obj, ti)
+	obj.a = obj.a - 1
+	assert(obj.a >= 0)
 
 	print("Time =", ti)
-	print("a = a + 1", obj.a)
-	print("b = b * a", obj.b)
+	print("a = a - 1", obj.a)
 end
 
-local function foo2(obj, ti)
-	obj.b = obj.b + 1
-	obj.a = obj.a * obj.b
+local function add2(obj, ti)
+	obj.a = obj.a + 2
 
 	print("Time =", ti)
-	print("b = b + 1", obj.b)
-	print("a = a * b", obj.a)
+	print("a = a + 2", obj.a)
 end
 
-local m = model.new { a = 1, b = 2 }
-m:command(3, foo1)
-m:command(2, foo2)
+local client1 = model.new { a = 1 }
+local client2 = model.new { a = 1 }
+local server = model.new { a = 1 }
 
-print_r(m:state())	-- a=1, b=2
-m:advance(2)
-print_r(m:state())	-- a=3, b=3
-m:advance(3)
-print_r(m:state())	-- a=4, b=12
-m:command(1, foo1)
-
-for ti, msg in m:error() do
-	print("ERR:",ti,msg)	-- a=10 b=5 ti=3
-end
-
-m:remove(2)
-m:advance(4)
-print_r(m:state())
-
-m:dump()
-
-m:command(2000, foo2)
-m:command(2001, foo1)
-m:advance(2000)
-print_r(m:state())
-
-m:advance(2001)
-for ti, msg in m:error() do
-	print("ERR:",ti,msg)
-end
+client1:queue_command(10, sub1)
+client1:queue_command(20, add2)
+assert(server:apply_command(10, sub1))
+assert(server:apply_command(20, add2))
 
 
+client2:queue_command(11, sub1)
+client2:queue_command(21, add2)
+assert(server:apply_command(11, sub1) == false)
+assert(server:apply_command(21, add2))
+
+local ti, state = server:current_state()
+print("--- Server time:", ti)
+print_r(state)
+
+client1:queue_command(21, add2)
+print("--- Client1 time:", 30)
+print_r(client1:snapshot(30))
+
+client2:queue_command(10, sub1)
+client2:queue_command(20, add2)
+client2:remove_command(11)
+print("--- Client2 time:", 30)
+print_r(client2:snapshot(30))
