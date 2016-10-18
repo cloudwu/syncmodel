@@ -46,7 +46,7 @@ local traceback = debug.traceback
 local tpack = table.pack
 local tunpack = table.unpack
 
-function model.new(obj, method)
+function model.new(obj, method, step)
 	local self = {
 		__base = deepcopy(obj),
 		__state = deepcopy(obj),
@@ -54,9 +54,20 @@ function model.new(obj, method)
 		__command_queue = {},
 		__snapshot = 0,
 		__snapinvalid = true,
-		__method = method
+		__method = method,
+		__step = step or 1000,
 	}
 	return setmetatable(self, model)
+end
+
+function model:timestamp(id, ti)
+	local step = self.__step
+	assert(id < step)
+	return ti * step + id
+end
+
+function model:time(ti)
+	return (ti + 1) * self.__step - 1
 end
 
 --- for server side
@@ -72,7 +83,7 @@ local function rollback(self)
 	end
 end
 
-local function insert_before(self, idx, ti, method, ...)
+local function insert_before(self, mode, idx, ti, method, ...)
 	local state = deepcopy(self.__base, self.__state)
 	local tq = self.__command_time
 	local cq = self.__command_queue
@@ -86,6 +97,9 @@ local function insert_before(self, idx, ti, method, ...)
 		rollback(self)
 		return false, err
 	end
+	if mode == "replace" then
+		idx = idx + 1
+	end
 	for i = idx, #tq do
 		local f = cq[i]
 		if not xpcall(m[f[1]], traceback, state, tq[i], tunpack(f, 2, f.n)) then
@@ -93,15 +107,22 @@ local function insert_before(self, idx, ti, method, ...)
 			return false, "Can't insert command"
 		end
 	end
-	table.insert(tq, idx, ti)
-	table.insert(cq, idx, tpack(method, ...))
-	return true
+	if mode == "insert" then
+		table.insert(tq, idx, ti)
+		table.insert(cq, idx, tpack(method, ...))
+	else
+		-- assert( mode == "replace" )
+		idx = idx - 1
+		tq[idx] = ti
+		cq[idx] = tpack(method, ...)
+	end
+	return ti
 end
 
--- call by server.
+-- call by server. mode can be "insert" "replace" "unique"
 -- return false, err_message when failed ;
--- return true, insert done, no error.
-function model:apply_command(ti, method, ...)
+-- return timestamp, insert done, no error.
+function model:apply_command(ti, mode, method, ...)
 	local tq = self.__command_time
 	local qlen = #tq
 	if qlen >= QUEUE_LENGTH then
@@ -117,15 +138,26 @@ function model:apply_command(ti, method, ...)
 	end
 
 	for i = 1, qlen do
+		if ti == tq[i] then
+			if mode == "unique" then
+				return false, "command duplicate"
+			elseif mode == "insert" then
+				ti = ti + self.__step
+			elseif mode == "replace" then
+				return insert_before(self, "replace", i, ti, method, ...)
+			else
+				error("Invalid mode : " .. mode)
+			end
+		end
 		if ti < tq[i] then
-			return insert_before(self, i, ti, method, ...)
+			return insert_before(self, "insert", i, ti, method, ...)
 		end
 	end
 	local ok, err = xpcall(self.__method[method], traceback, self.__state, ti, ...)
 	if ok then
 		table.insert(tq, ti)
 		table.insert(self.__command_queue, tpack(method, ...))
-		return true
+		return ti
 	end
 	return false, err
 end
@@ -147,11 +179,26 @@ local function touch_snapshot(self, ti)
 	end
 end
 
-function model:queue_command(ti, method, ...)
+-- call by client. mode can be "insert" "replace" "unique"
+function model:queue_command(ti, mode, method, ...)
 	local tq = self.__command_time
 	local cq = self.__command_queue
 	local m = self.__method
 	for i = 1, #tq do
+		if ti == tq[i] then
+			if mode == "unique" then
+				return false
+			elseif mode == "insert" then
+				ti = ti + self.__step
+			elseif mode == "replace" then
+				tq[i] = ti
+				cq[i] = tpack(method,...)
+				touch_snapshot(self, ti)
+				return ti
+			else
+				error ("Invalid mode : " .. mode)
+			end
+		end
 		assert(ti ~= tq[i])
 		if ti < tq[i] then
 			if i > QUEUE_LENGTH and tq[1] < self.__snapshot then
@@ -168,13 +215,13 @@ function model:queue_command(ti, method, ...)
 				table.insert(cq, i, tpack(method, ...))
 			end
 			touch_snapshot(self, ti)
-			return true
+			return ti
 		end
 	end
 	table.insert(tq, ti)
 	table.insert(cq, tpack(method,...))
 	touch_snapshot(self, ti)
-	return true
+	return ti
 end
 
 function model:remove_command(ti)
